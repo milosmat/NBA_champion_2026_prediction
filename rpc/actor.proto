@@ -1,0 +1,16 @@
+syntax = "proto3";
+package actor;
+
+service ActorService {
+  rpc Send (Envelope) returns (Ack) {}
+}
+
+message Envelope {
+  string target = 1;
+  string type = 2;
+  string payload_json = 3; // raw JSON to keep compatibility
+}
+
+message Ack {
+  bool ok = 1;
+}
