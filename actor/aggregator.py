@@ -145,11 +145,14 @@ class RoundComplete:
         self.fedprox_mu = float(fedprox_mu)
 
 class AggregatorP2P(Actor):
-    def __init__(self, name, system):
+    def __init__(self, name, system, async_mode: bool = False, async_batch: int = 8, fedprox_mu: float = 0.0):
         super().__init__(name, system)
         self.received = []
         self.last_global = None
         self.team_to_cluster = None
+        self.async_mode = bool(async_mode)
+        self.async_batch = max(1, int(async_batch))
+        self.fedprox_mu = float(fedprox_mu)
 
 class SetClusterModels:
     def __init__(self, cluster_models: dict):
@@ -163,6 +166,8 @@ class SetTeamClusters:
         from actor.p2p import ModelShare
         if isinstance(message, ModelShare):
             self.received.append((message.sender, message.coef, message.intercept))
+            if getattr(self, "async_mode", False) and len(self.received) >= getattr(self, "async_batch", 8):
+                await self._flush_async()
         elif isinstance(message, SetTeamClusters):
             self.team_to_cluster = dict(message.mapping) if message.mapping else {}
             print(f"[AggregatorP2P] Učitan mapping team->cluster ({len(self.team_to_cluster)})")
@@ -284,3 +289,73 @@ class SetTeamClusters:
 
     async def on_start(self):
         print("[AggregatorP2P] spreman za prijem lokalnih modela")
+        
+    async def _flush_async(self):
+        if not self.received:
+            return
+        # Per-cluster async aggregation if mapping provided
+        if isinstance(self.team_to_cluster, dict) and self.team_to_cluster:
+            by_cluster = {}
+            for (team, coef, intercept) in self.received:
+                cid = self.team_to_cluster.get(team)
+                if cid is None:
+                    continue
+                by_cluster.setdefault(cid, {"coefs": [], "ints": []})
+                by_cluster[cid]["coefs"].append(coef)
+                by_cluster[cid]["ints"].append(intercept)
+            cluster_models = {}
+            for cid, vals in by_cluster.items():
+                if not vals["coefs"]:
+                    continue
+                avg_coef = np.mean(vals["coefs"], axis=0).reshape(1, -1)
+                avg_intercept = float(np.mean(vals["ints"], axis=0))
+                if isinstance(self.last_global, dict) and self.fedprox_mu > 0.0 and cid in self.last_global:
+                    pcoef, pint = self.last_global[cid]
+                    mu = float(self.fedprox_mu)
+                    gcoef = (1.0 - mu) * avg_coef + mu * pcoef
+                    gint = float((1.0 - mu) * avg_intercept + mu * pint)
+                else:
+                    gcoef, gint = avg_coef, avg_intercept
+                cluster_models[cid] = {"coef": gcoef, "intercept": gint}
+            if cluster_models:
+                self.system.tell("crdt", Increment())
+                try:
+                    self.system.tell("scheduler", SetClusterModels(cluster_models))
+                except Exception:
+                    pass
+                # derive overall global for evaluator as avg over clusters
+                all_coefs = [m["coef"] for m in cluster_models.values()]
+                all_ints = [m["intercept"] for m in cluster_models.values()]
+                gcoef = np.mean(all_coefs, axis=0)
+                gint = float(np.mean(all_ints, axis=0))
+                self.system.tell("evaluator", GlobalModel(gcoef, gint, round_idx=None))
+                try:
+                    self.system.tell("scheduler", SetGlobalModel(gcoef, gint))
+                except Exception:
+                    pass
+                self.last_global = {cid: (m["coef"].copy(), m["intercept"]) for cid, m in cluster_models.items()}
+        else:
+            coefs = [c for (_, c, _) in self.received]
+            intercepts = [i for (_, _, i) in self.received]
+            if not coefs:
+                self.received = []
+                return
+            avg_coef = np.mean(coefs, axis=0).reshape(1, -1)
+            avg_intercept = float(np.mean(intercepts, axis=0))
+            if (self.last_global is not None) and (not isinstance(self.last_global, dict)) and self.fedprox_mu > 0.0:
+                prev_coef, prev_intercept = self.last_global
+                mu = float(self.fedprox_mu)
+                global_coef = (1.0 - mu) * avg_coef + mu * prev_coef
+                global_intercept = float((1.0 - mu) * avg_intercept + mu * prev_intercept)
+            else:
+                global_coef = avg_coef
+                global_intercept = avg_intercept
+            self.system.tell("crdt", Increment())
+            self.system.tell("evaluator", GlobalModel(global_coef, global_intercept, round_idx=None))
+            try:
+                self.system.tell("scheduler", SetGlobalModel(global_coef, global_intercept))
+            except Exception:
+                pass
+            self.last_global = (global_coef.copy(), global_intercept)
+        # reset buffer
+        self.received = []

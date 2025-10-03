@@ -76,7 +76,9 @@ Zajednički parametri (primeri):
 - `--host` / `--port` mrežni parametri
 - `--transport` tcp | grpc
 - `--rounds` broj federativnih rundi (provider/p2p)
-- `--fedprox-mu` koeficijent μ (opciono)
+- `--fedprox_mu` koeficijent μ (opciono)
+- `--async-fed` asinhrono federisano učenje (bez barijere po rundama; važi za P2P sa Scheduler/Worker)
+- `--async-batch` broj ModelShare ažuriranja po jednoj async agregaciji (podrazumevano 8)
 
 ### 5.1 Provider mod
 
@@ -100,6 +102,23 @@ python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5100 --rounds 2
 python main.py --mode p2p --node BOS --host 127.0.0.1 --port 5101 --peers MIA@127.0.0.1:5100 --rounds 2
 python main.py --mode p2p --node CHI --host 127.0.0.1 --port 5102 --peers MIA@127.0.0.1:5100,BOS@127.0.0.1:5101 --rounds 2
 
+#### 5.2.1 P2P async mod (bez barijere)
+
+Napomena: Async mod važi za P2P sa Scheduler/Worker orkestracijom. U async modu argument `--rounds` se ignoriše; globalni modeli se emituju inkrementalno posle svakih `--async-batch` lokalnih ažuriranja.
+
+powershell
+python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5110 --async-fed --async-batch 8 --fedprox_mu 0.01
+python main.py --mode p2p --node BOS --host 127.0.0.1 --port 5111 --peers MIA@127.0.0.1:5110 --async-fed --async-batch 8 --fedprox_mu 0.01
+python main.py --mode p2p --node CHI --host 127.0.0.1 --port 5112 --peers MIA@127.0.0.1:5110 --async-fed --async-batch 8 --fedprox_mu 0.01
+
+Zaustavljanje u P2P async modu:
+
+- P2P async je kontinuiran po dizajnu (nema barijera). Logički kraj možeš dobiti na dva načina:
+  1. koristi klasični P2P sa rundama (skini `--async-fed` i postavi `--rounds N`) – procesi se završavaju po poslednjoj rundi;
+  2. ili pređi na „gossip async“ (sekcija 5.3.1) koji ima ugrađene uslove zaustavljanja (broj flush-eva, vreme, konvergencija).
+
+Ako želiš, možemo dodati i iste stop‑flagove za P2P async (analogno gossip‑async) – reci i implementiraćemo.
+
 ### 5.3 Gossip mod
 
 Reporter (barijera + globalni model), ostali peer-ovi šalju samo lokalni share.
@@ -108,6 +127,54 @@ powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5200 --peers BOS@127.0.0.1:5201,CHI@127.0.0.1:5202 --reporter --gossip-rounds 2 --gossip-eval
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5201 --peers MIA@127.0.0.1:5200,CHI@127.0.0.1:5202
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5202 --peers MIA@127.0.0.1:5200,BOS@127.0.0.1:5201
+
+Napomena: Gossip mod ostaje runda-baziran (reporter čeka sve peer-ove). Za potpuno asinhrono ponašanje koristi P2P async mod iz 5.2.1.
+
+#### 5.3.1 Gossip async (kontinuirani)
+
+Eksperimentalno: kontinuirani (bez barijere) gossip mod sa prozorima i starenjem.
+
+Parametri:
+
+- `--gossip-async` uključi kontinuirani gossip
+- `--gossip-batch` minimalan broj share-ova pre flush-a (reporter)
+- `--gossip-window-ms` vremenski prozor za flush ako batch nije dosegnut
+- `--gossip-interval-ms` koliko često svaki čvor ponavlja lokalni trening i šalje share
+- `--gossip-staleness` α koeficijent za staleness težine (veće → brže “zaboravljanje” starih verzija)
+- `--gossip-max-flushes` maksimalan broj flush-eva posle kog se reporter automatski zaustavlja (0 = bez limita)
+- `--gossip-max-seconds` maksimalno trajanje kontinuiranog gossip-a (0 = bez limita)
+- `--gossip-converge-eps` epsilon prag konvergencije; meri se L2 delta koeficijenata + |delta intercept| između dva uzastopna globalna modela
+- `--gossip-converge-patience` koliko uzastopnih flush-eva mora biti ispod eps da bi se smatrao konvergiranim
+- `--gossip-eval-on-stop` pokreni playoff evaluaciju pri automatskom stop-u (samo na reporteru)
+
+powershell
+python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5210 --peers BOS@127.0.0.1:5211,CHI@127.0.0.1:5212 --reporter --gossip-async --gossip-batch 4 --gossip-window-ms 1500 --gossip-interval-ms 2000 --gossip-staleness 0.5
+python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5211 --peers MIA@127.0.0.1:5210,CHI@127.0.0.1:5212 --gossip-async --gossip-interval-ms 2000
+python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5212 --peers MIA@127.0.0.1:5210,BOS@127.0.0.1:5211 --gossip-async --gossip-interval-ms 2000
+
+Primeri sa logičkim stopom:
+
+powershell
+
+# Stop nakon 5 flush-eva, plus evaluacija na stop
+
+python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5220 --peers BOS@127.0.0.1:5221,CHI@127.0.0.1:5222 --reporter --gossip-async --gossip-batch 3 --gossip-max-flushes 5 --gossip-eval-on-stop
+python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5221 --peers MIA@127.0.0.1:5220,CHI@127.0.0.1:5222 --gossip-async
+python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5222 --peers MIA@127.0.0.1:5220,BOS@127.0.0.1:5221 --gossip-async
+
+powershell
+
+# Stop na konvergenciju (eps=1e-3, patience=3) ili po isteku 60s – šta god se desi prvo
+
+python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5230 --peers BOS@127.0.0.1:5231,CHI@127.0.0.1:5232 --reporter --gossip-async --gossip-batch 3 --gossip-converge-eps 0.001 --gossip-converge-patience 3 --gossip-max-seconds 60 --gossip-eval-on-stop
+python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5231 --peers MIA@127.0.0.1:5230,CHI@127.0.0.1:5232 --gossip-async
+python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5232 --peers MIA@127.0.0.1:5230,BOS@127.0.0.1:5231 --gossip-async
+
+Napomene:
+
+- U async-gossip modu nema `--gossip-rounds`; evaluaciju iniciraj ručno ili zadrži `--gossip-eval` ali vezano za vremenski trenutak, ne za runde.
+- Rezultati su manje “snapshot”, a više “stream” – metrika može varirati; preporuka je da meriš performanse u vremenskim intervalima.
+- Reporter se sam zaustavlja kada ispuni uslov(e) iznad; ostali peer-ovi se takođe gase (aktorski loop izlazi).
 
 ### 5.4 gRPC transport
 
@@ -128,7 +195,7 @@ Ako dobiješ poruku o stubovima – prati instrukcije iz greške.
 Aktiviraj dodavanjem `--fedprox-mu` (npr. 0.01). Radnici u klijent treninzima dodaju proximal regularizaciju prema globalnom modelu.
 
 powershell
-python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5400 --rounds 3 --fedprox-mu 0.01
+python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5400 --rounds 3 --fedprox_mu 0.01
 
 ## 7. Playoff simulacija & šampion
 

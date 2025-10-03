@@ -87,7 +87,13 @@ class ActorSystem:
         if mtype == "ModelShare":
             from actor.p2p import ModelShare
             import numpy as np
-            m = ModelShare(payload["sender"], np.array(payload["coef"], dtype=float), float(payload["intercept"]))
+            m = ModelShare(
+                payload["sender"],
+                np.array(payload["coef"], dtype=float),
+                float(payload["intercept"]),
+                payload.get("version"),
+                payload.get("ts_ms"),
+            )
             self.tell(target, m)
         elif mtype == "TrainRequest":
             from actor.aggregator import TrainRequest
@@ -226,7 +232,21 @@ class ActorSystem:
     def _serialize(self, target: str, message):
         mname = message.__class__.__name__
         if mname == "ModelShare":
-            return {"target": target, "type": "ModelShare", "payload": {"sender": message.sender, "coef": list(message.coef), "intercept": float(message.intercept)}}
+            payload = {
+                "sender": message.sender,
+                "coef": list(message.coef),
+                "intercept": float(message.intercept),
+            }
+            if getattr(message, "version", None) is not None:
+                payload["version"] = int(message.version)
+            import time
+            payload["ts_ms"] = getattr(message, "ts_ms", None)
+            if payload["ts_ms"] is None:
+                try:
+                    payload["ts_ms"] = int(time.time() * 1000)
+                except Exception:
+                    payload["ts_ms"] = 0
+            return {"target": target, "type": "ModelShare", "payload": payload}
         if mname == "TrainRequest":
             return {"target": target, "type": "TrainRequest"}
         if mname == "StartRound":

@@ -26,9 +26,22 @@ def parse_args():
     p.add_argument("--workers", type=int, default=2, help="Broj worker aktora po nodu")
     p.add_argument("--rounds", type=int, default=1, help="Broj rundi u P2P režimu")
     p.add_argument("--fedprox_mu", type=float, default=0.0, help="Proksimalni koeficijent (0=FedAvg)")
+    p.add_argument("--async-fed", action="store_true", help="Asinhrono federisano učenje (bez barijere po rundama)")
+    p.add_argument("--async-batch", type=int, default=8, help="Broj ModelShare ažuriranja po jednoj agregaciji u async modu")
     p.add_argument("--reporter", action="store_true", help="Samo za p2p-gossip: ovaj nod šalje GlobalModel evaluatoru")
     p.add_argument("--gossip-rounds", type=int, default=1, help="Broj rundi u p2p-gossip modu")
     p.add_argument("--gossip-eval", action="store_true", help="Posle poslednje gossip runde traži playoff evaluaciju")
+    # Continuous gossip options
+    p.add_argument("--gossip-async", action="store_true", help="Kontinuirani gossip bez barijere (reporter flush po prozoru)")
+    p.add_argument("--gossip-batch", type=int, default=3, help="Minimalni broj share-ova pre flush-a u async gossip modu")
+    p.add_argument("--gossip-window-ms", type=int, default=2000, help="Vremenski prozor (ms) posle kog se radi flush ako batch nije dostignut")
+    p.add_argument("--gossip-interval-ms", type=int, default=2000, help="Koliko često čvor šalje svoj share u async gossip modu")
+    p.add_argument("--gossip-staleness", type=float, default=0.0, help="Staleness koeficijent α (0=bez težina; veće=brže zaboravljanje)")
+    p.add_argument("--gossip-max-flushes", type=int, default=0, help="Max broj flush-eva pre automatskog zaustavljanja (0 = bez limita)")
+    p.add_argument("--gossip-max-seconds", type=int, default=0, help="Max trajanje kontinuiranog gossip-a u sekundama (0 = bez limita)")
+    p.add_argument("--gossip-eval-on-stop", action="store_true", help="Pokreni playoff evaluaciju prilikom zaustavljanja async gossip-a")
+    p.add_argument("--gossip-converge-eps", type=float, default=0.0, help="Epsilon prag konvergencije (L2 delta koef. + |delta intercept|) za async gossip")
+    p.add_argument("--gossip-converge-patience", type=int, default=3, help="Broj uzastopnih flush-eva ispod eps pre stop-a")
     p.add_argument("--transport", choices=["tcp", "grpc"], default="tcp", help="Transport sloj: tcp (default) ili grpc (opciono)")
     p.add_argument("--n-clusters", type=int, default=4, help="Broj ML klastera timova (KMeans) u P2P režimu")
     return p.parse_args()
@@ -92,7 +105,28 @@ async def main():
             )
 
         gname = f"p2p_{node_name}"
-        system.create_actor(gname, lambda n, s: TeamNodeP2P(n, s, train, features, imputer, total_rounds=int(args.gossip_rounds), eval_after=bool(args.gossip_eval)))
+        system.create_actor(
+            gname,
+            lambda n, s: TeamNodeP2P(
+                n,
+                s,
+                train,
+                features,
+                imputer,
+                total_rounds=int(args.gossip_rounds),
+                eval_after=bool(args.gossip_eval),
+                gossip_async=bool(args.gossip_async),
+                gossip_batch=int(args.gossip_batch),
+                gossip_window_ms=int(args.gossip_window_ms),
+                gossip_interval_ms=int(args.gossip_interval_ms),
+                staleness_alpha=float(args.gossip_staleness),
+                gossip_max_flushes=int(args.gossip_max_flushes),
+                gossip_max_seconds=int(args.gossip_max_seconds),
+                gossip_eval_on_stop=bool(args.gossip_eval_on_stop),
+                gossip_converge_eps=float(args.gossip_converge_eps),
+                gossip_converge_patience=int(args.gossip_converge_patience),
+            ),
+        )
 
         peer_actor_names = [f"p2p_{pname}" for (pname, _, _) in peers]
         reporter_actor = f"p2p_{node_name}" if args.reporter else (peer_actor_names[0] if peer_actor_names else None)
@@ -120,9 +154,12 @@ async def main():
             all_teams = sorted(df["home_team"].unique())
             system.create_actor(
                 "scheduler",
-                lambda n, s: Scheduler(n, s, all_teams, train, features, imputer, rounds=args.rounds, fedprox_mu=args.fedprox_mu)
+                lambda n, s: Scheduler(n, s, all_teams, train, features, imputer, rounds=args.rounds, fedprox_mu=args.fedprox_mu, async_mode=bool(args.async_fed))
             )
-            system.create_actor("aggregator_p2p", lambda n, s: AggregatorP2P(n, s))
+            system.create_actor(
+                "aggregator_p2p",
+                lambda n, s: AggregatorP2P(n, s, async_mode=bool(args.async_fed), async_batch=int(args.async_batch), fedprox_mu=float(args.fedprox_mu))
+            )
             print("[Main] Scheduler pokrenut na reporter nodu")
             # Compute clusters once on reporter and distribute mapping
             team_clusters = compute_team_clusters(train, features, n_clusters=4)
