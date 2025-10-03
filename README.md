@@ -186,25 +186,6 @@ Fajl: `storage/results.db`
 | FedProx nema efekat       | μ=0 ili nema globalnog modela prve runde           | Povećaj `--fedprox-mu` (>0), više rundi                |
 | Port zauzet               | Prethodni proces nije ugašen                       | Prekini python proces (Task Manager) i promeni port    |
 
-## 13. Sledeći koraci (ideje)
-
-- TLS za gRPC (sertifikati, secure_channel)
-- WebSocket transport
-- PyTorch model varijanta
-- ScheduleWatcher ingest realnog rasporeda (nba_api)
-- DuckDB / journaling za poruke
-- Napredni membership (NodeJoin/Leave full lifecycle)
-- CI workflow i veća pokrivenost testovima
-
----
-
-pokreni gossip demo (TCP):
-
-powershell
-python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5200 --peers BOS@127.0.0.1:5201,CHI@127.0.0.1:5202 --reporter --gossip-rounds 2 --gossip-eval
-python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5201 --peers MIA@127.0.0.1:5200,CHI@127.0.0.1:5202
-python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5202 --peers MIA@127.0.0.1:5200,BOS@127.0.0.1:5201
-
 Zatim proveri šampiona:
 
 powershell
