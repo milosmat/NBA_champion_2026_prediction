@@ -47,7 +47,7 @@ Glavne poruke (nije iscrpno): `TrainRequest`, `ModelShare` / `RoundComplete`, `S
 
 Preporuka: Python 3.11+ (ok i 3.13), PowerShell na Windows-u.
 
-Kreiraj i aktiviraj venv:
+Kreiranje i aktiviranje venv okruženja:
 
 powershell
 python -m venv .venv
@@ -63,7 +63,7 @@ python -m grpc_tools.protoc -I rpc --python_out=rpc --grpc_python_out=rpc rpc/ac
 
 ## 4. Priprema podataka
 
-Direktorijum `dataset/` već sadrži očišćen CSV (`nba_games_clean.csv`) i timske CSV fajlove u `dataset/teams` ili `teams/`. Trenutni kod koristi podatke direktno – nije potreban dodatni import. Ako dodaš nove CSV fajlove pazi da kolone budu konzistentne.
+Direktorijum `dataset/` već sadrži očišćen CSV (`nba_games_clean.csv`) i timske CSV fajlove u `dataset/teams` ili `teams/`. Trenutni kod koristi podatke direktno – nije potreban dodatni import. Pri dodavanju novih CSV fajlova, kolone treba da budu konzistentne.
 
 ## 5. Pokretanje režima
 
@@ -113,11 +113,11 @@ python main.py --mode p2p --node CHI --host 127.0.0.1 --port 5112 --peers MIA@12
 
 Zaustavljanje u P2P async modu:
 
-- P2P async je kontinuiran po dizajnu (nema barijera). Logički kraj možeš dobiti na dva načina:
-  1. koristi klasični P2P sa rundama (skini `--async-fed` i postavi `--rounds N`) – procesi se završavaju po poslednjoj rundi;
-  2. ili pređi na „gossip async“ (sekcija 5.3.1) koji ima ugrađene uslove zaustavljanja (broj flush-eva, vreme, konvergencija).
+- P2P async je kontinuiran po dizajnu (nema barijera). Logički kraj se postiže na dva načina:
+  1. upotreba klasičnog P2P režima sa rundama (bez `--async-fed`, uz `--rounds N`) – procesi se završavaju po poslednjoj rundi;
+  2. upotreba „gossip async“ režima (sekcija 5.3.1) sa ugrađenim uslovima zaustavljanja (broj flush-eva, vreme, konvergencija).
 
-Ako želiš, možemo dodati i iste stop‑flagove za P2P async (analogno gossip‑async) – reci i implementiraćemo.
+Napomena: Po potrebi, isti stop‑parametri mogu se dodati i za P2P async (analogno gossip‑async).
 
 ### 5.3 Gossip mod
 
@@ -128,7 +128,7 @@ python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5200 --peers
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5201 --peers MIA@127.0.0.1:5200,CHI@127.0.0.1:5202
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5202 --peers MIA@127.0.0.1:5200,BOS@127.0.0.1:5201
 
-Napomena: Gossip mod ostaje runda-baziran (reporter čeka sve peer-ove). Za potpuno asinhrono ponašanje koristi P2P async mod iz 5.2.1.
+Napomena: Gossip mod ostaje runda-baziran (reporter čeka sve peer-ove). Za potpuno asinhrono ponašanje koristi se P2P async mod iz 5.2.1.
 
 #### 5.3.1 Gossip async (kontinuirani)
 
@@ -172,13 +172,13 @@ python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5232 --peers
 
 Napomene:
 
-- U async-gossip modu nema `--gossip-rounds`; evaluaciju iniciraj ručno ili zadrži `--gossip-eval` ali vezano za vremenski trenutak, ne za runde.
-- Rezultati su manje “snapshot”, a više “stream” – metrika može varirati; preporuka je da meriš performanse u vremenskim intervalima.
+- U async-gossip modu nema `--gossip-rounds`; evaluacija se inicira ručno ili uz `--gossip-eval`, vezano za vremenski trenutak (ne za runde).
+- Rezultati su manje “snapshot”, a više “stream” – metrika može varirati; preporučuje se merenje performansi u vremenskim intervalima.
 - Reporter se sam zaustavlja kada ispuni uslov(e) iznad; ostali peer-ovi se takođe gase (aktorski loop izlazi).
 
 ### 5.4 gRPC transport
 
-Dodaj `--transport grpc` na sve procese (posle generisanja stubova). Portovi ostaju isti.
+Dovoljno je dodati `--transport grpc` na sve procese (posle generisanja stubova). Portovi ostaju isti.
 
 powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5300 --peers BOS@127.0.0.1:5301,CHI@127.0.0.1:5302 --reporter --gossip-rounds 2 --gossip-eval --transport grpc
@@ -188,7 +188,7 @@ MIA@127.0.0.1:5300,CHI@127.0.0.1:5302 --transport grpc
 
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5302 --peers MIA@127.0.0.1:5300,BOS@127.0.0.1:5301 --transport grpc
 
-Ako dobiješ poruku o stubovima – prati instrukcije iz greške.
+Ukoliko se pojavi poruka o stubovima – pratiti instrukcije iz same greške.
 
 ## 6. FedProx
 
@@ -253,7 +253,7 @@ Fajl: `storage/results.db`
 | FedProx nema efekat       | μ=0 ili nema globalnog modela prve runde           | Povećaj `--fedprox-mu` (>0), više rundi                |
 | Port zauzet               | Prethodni proces nije ugašen                       | Prekini python proces (Task Manager) i promeni port    |
 
-Zatim proveri šampiona:
+Provera šampiona:
 
 powershell
 python scripts/who_wins_playoffs.py
