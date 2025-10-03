@@ -22,29 +22,37 @@ class WorkDone:
     def __init__(self, worker: str):
         self.worker = worker
 
+class SetClusterModels:
+    def __init__(self, cluster_models: dict):
+        self.cluster_models = cluster_models
+
+class SetTeamClusters:
+    def __init__(self, mapping: dict):
+        self.mapping = mapping
+
 
 class Scheduler(Actor):
     def __init__(self, name, system, teams, train_data, features, imputer, rounds: int = 1, fedprox_mu: float = 0.0):
         super().__init__(name, system)
-        # Queues and data
+
         self.all_teams = list(teams)
         self.teams = list(teams)
         self.train_data = train_data
         self.features = features
         self.imputer = imputer
-        # Bookkeeping
+
         self.active_requests = 0
         self.current_round = 1
         self.total_rounds = int(rounds)
         self.fedprox_mu = float(fedprox_mu)
         self.workers = set()
+        self.team_to_cluster = {}
+        self.cluster_models = None
 
     async def default_behavior(self, message):
-        from actor.scheduler import GiveMeWork, AssignTeam, NoMoreWork, RegisterWorker, WorkDone
         from actor.aggregator import RoundComplete, SetGlobalModel
 
         if isinstance(message, RegisterWorker):
-            # Zapamti gde živi ovaj worker da bismo mogli da mu pošaljemo posao
             self.system.register_peer(message.worker, message.host, message.port)
             self.workers.add(message.worker)
             print(f"[Scheduler] registrovao remote worker {message.worker} @ {message.host}:{message.port}")
@@ -52,23 +60,30 @@ class Scheduler(Actor):
         elif isinstance(message, GiveMeWork):
             if self.teams:
                 team = self.teams.pop(0)
-                # Za mrežu šaljemo samo naziv tima; worker će lokalno iseći svoj train
                 self.active_requests += 1
+                if self.cluster_models and self.team_to_cluster:
+                    cid = self.team_to_cluster.get(team)
+                    if cid is not None and cid in self.cluster_models:
+                        cm = self.cluster_models[cid]
+                        try:
+                            self.system.tell(message.worker, SetGlobalModel(cm["coef"], cm["intercept"]))
+                        except Exception:
+                            pass
                 self.system.tell(message.worker, AssignTeam(team))
                 print(f"[Scheduler] dodelio tim {team} → {message.worker}")
             else:
                 self.system.tell(message.worker, NoMoreWork())
                 print(f"[Scheduler] nema više posla za {message.worker}")
-                # Ako je red prazan i nema aktivnih dodela — kraj runde ili kraj ukupno
+
                 if not self.teams and self.active_requests == 0:
                     self.system.tell("aggregator_p2p", RoundComplete(self.current_round, self.total_rounds, self.fedprox_mu))
                     print(f"[Scheduler] Runda {self.current_round}/{self.total_rounds} završena → poslato RoundComplete")
-                    # Priprema sledeće runde ili završetak
+
                     if self.current_round < self.total_rounds:
                         self.current_round += 1
                         self.teams = list(self.all_teams)
                         print(f"[Scheduler] Pokrećem rundu {self.current_round}/{self.total_rounds}")
-                        # Kick-off: enqueue GiveMeWork for each registered worker
+
                         for w in sorted(self.workers):
                             self.system.tell(self.name, GiveMeWork(w))
                     else:
@@ -92,3 +107,9 @@ class Scheduler(Actor):
         elif isinstance(message, SetGlobalModel):
             for w in sorted(self.workers):
                 self.system.tell(w, message)
+        elif isinstance(message, SetClusterModels):
+            self.cluster_models = message.cluster_models or {}
+            for w in sorted(self.workers):
+                pass
+        elif isinstance(message, SetTeamClusters):
+            self.team_to_cluster = dict(message.mapping) if message.mapping else {}

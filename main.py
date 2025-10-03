@@ -13,6 +13,7 @@ from actor.scheduler import Scheduler
 from actor.worker import TeamNodeWorker
 from actor.worker import TeamNodeWorker as _W
 import argparse
+from clustering import compute_team_clusters
 
 
 def parse_args():
@@ -29,6 +30,7 @@ def parse_args():
     p.add_argument("--gossip-rounds", type=int, default=1, help="Broj rundi u p2p-gossip modu")
     p.add_argument("--gossip-eval", action="store_true", help="Posle poslednje gossip runde traži playoff evaluaciju")
     p.add_argument("--transport", choices=["tcp", "grpc"], default="tcp", help="Transport sloj: tcp (default) ili grpc (opciono)")
+    p.add_argument("--n-clusters", type=int, default=4, help="Broj ML klastera timova (KMeans) u P2P režimu")
     return p.parse_args()
 
 
@@ -122,6 +124,15 @@ async def main():
             )
             system.create_actor("aggregator_p2p", lambda n, s: AggregatorP2P(n, s))
             print("[Main] Scheduler pokrenut na reporter nodu")
+            # Compute clusters once on reporter and distribute mapping
+            team_clusters = compute_team_clusters(train, features, n_clusters=4)
+            try:
+                from actor.aggregator import SetTeamClusters as AggSetTeamClusters
+                from actor.scheduler import SetTeamClusters as SchSetTeamClusters
+                system.tell("aggregator_p2p", AggSetTeamClusters(team_clusters))
+                system.tell("scheduler", SchSetTeamClusters(team_clusters))
+            except Exception:
+                pass
 
         if not is_reporter:
             worker_names = []

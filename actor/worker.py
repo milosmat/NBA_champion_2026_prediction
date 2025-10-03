@@ -74,30 +74,24 @@ class TeamNodeWorker(Actor):
             team = message.team_name
             print(f"[{self.name}] dobio posao: {team}")
 
-            # lokalno izdvajanje podataka za tim
             if self.train_df is None:
                 print(f"[{self.name}] nema lokalni train_df, ne mogu da izdvojim podatke za {team}")
-                # završi posao bez rezultata
+
                 self.system.tell(self.scheduler, WorkDone(self.name))
                 self.system.tell(self.scheduler, GiveMeWork(self.name))
                 return
             data = self.train_df[(self.train_df["home_team"] == team) | (self.train_df["away_team"] == team)]
 
-            # pripremi podatke
             X = self.imputer.transform(data[self.features])
             y = data["home_win"]
 
-            # PROVERA: da li y ima bar dve klase
             if len(set(y)) < 2:
                 print(f"[{self.name}] tim {team} nema dovoljno klasa, preskačem.")
-                # označi posao završenim i traži novi
                 self.system.tell(self.scheduler, WorkDone(self.name))
                 self.system.tell(self.scheduler, GiveMeWork(self.name))
                 return
 
-            # treniraj model
             if self.fedprox_mu > 0.0 and self.global_coef is not None and self.global_intercept is not None:
-                # Pravi FedProx sa proksimalnim terminom oko globalnih težina
                 try:
                     w, b = self._train_fedprox(
                         X, y,

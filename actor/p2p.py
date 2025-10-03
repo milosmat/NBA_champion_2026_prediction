@@ -72,7 +72,6 @@ class TeamNodeP2P(Actor):
             for p in self.peers:
                 self.system.tell(p, share)
 
-            # 3) ako sam sam sebi peer (nije), ništa — čekam tuđe update-ove
 
         elif isinstance(message, ModelShare):
             self.collected[message.sender] = (message.coef, message.intercept)

@@ -116,6 +116,11 @@ Dodaj `--transport grpc` na sve procese (posle generisanja stubova). Portovi ost
 powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5300 --peers BOS@127.0.0.1:5301,CHI@127.0.0.1:5302 --reporter --gossip-rounds 2 --gossip-eval --transport grpc
 
+python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5301 --peers
+MIA@127.0.0.1:5300,CHI@127.0.0.1:5302 --transport grpc
+
+python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5302 --peers MIA@127.0.0.1:5300,BOS@127.0.0.1:5301 --transport grpc
+
 Ako dobiješ poruku o stubovima – prati instrukcije iz greške.
 
 ## 6. FedProx

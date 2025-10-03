@@ -149,16 +149,61 @@ class AggregatorP2P(Actor):
         super().__init__(name, system)
         self.received = []
         self.last_global = None
+        self.team_to_cluster = None
+
+class SetClusterModels:
+    def __init__(self, cluster_models: dict):
+        self.cluster_models = cluster_models
+
+class SetTeamClusters:
+    def __init__(self, mapping: dict):
+        self.mapping = mapping
 
     async def default_behavior(self, message):
         from actor.p2p import ModelShare
         if isinstance(message, ModelShare):
-            self.received.append((message.coef, message.intercept))
+            self.received.append((message.sender, message.coef, message.intercept))
+        elif isinstance(message, SetTeamClusters):
+            self.team_to_cluster = dict(message.mapping) if message.mapping else {}
+            print(f"[AggregatorP2P] Učitan mapping team->cluster ({len(self.team_to_cluster)})")
         elif isinstance(message, AllDone):
             if not self.received:
                 print("[AggregatorP2P] Nema primljenih modela za agregaciju.")
                 return
-            coefs, intercepts = zip(*self.received)
+
+            if isinstance(self.team_to_cluster, dict) and self.team_to_cluster:
+                by_cluster = {}
+                for (team, coef, intercept) in self.received:
+                    cid = self.team_to_cluster.get(team)
+                    if cid is None:
+                        continue
+                    by_cluster.setdefault(cid, {"coefs": [], "ints": []})
+                    by_cluster[cid]["coefs"].append(coef)
+                    by_cluster[cid]["ints"].append(intercept)
+                cluster_models = {}
+                for cid, vals in by_cluster.items():
+                    avg_coef = np.mean(vals["coefs"], axis=0).reshape(1, -1)
+                    avg_intercept = float(np.mean(vals["ints"], axis=0))
+                    cluster_models[cid] = {"coef": avg_coef, "intercept": avg_intercept}
+
+                try:
+                    self.system.tell("scheduler", SetClusterModels(cluster_models))
+                except Exception:
+                    pass
+
+                all_coefs = [m["coef"] for m in cluster_models.values()]
+                all_ints = [m["intercept"] for m in cluster_models.values()]
+                if all_coefs and all_ints:
+                    gcoef = np.mean(all_coefs, axis=0)
+                    gint = float(np.mean(all_ints, axis=0))
+                    self.system.tell("evaluator", GlobalModel(gcoef, gint, round_idx=None))
+                print(f"[AggregatorP2P] Poslati per-cluster modeli (final)")
+                self.last_global = {cid: (m["coef"].copy(), m["intercept"]) for cid, m in cluster_models.items()}
+                self.received = []
+                return
+
+            coefs = [c for (_, c, _) in self.received]
+            intercepts = [i for (_, _, i) in self.received]
             global_coef = np.mean(coefs, axis=0).reshape(1, -1)
             global_intercept = float(np.mean(intercepts, axis=0))
             self.system.tell("crdt", Increment())
@@ -175,29 +220,67 @@ class AggregatorP2P(Actor):
             if not self.received:
                 print(f"[AggregatorP2P] Round {message.round_idx}: nema primljenih modela")
                 return
-            coefs, intercepts = zip(*self.received)
-            avg_coef = np.mean(coefs, axis=0).reshape(1, -1)
-            avg_intercept = float(np.mean(intercepts, axis=0))
 
-            if self.last_global is not None and message.fedprox_mu > 0.0:
-                prev_coef, prev_intercept = self.last_global
-                mu = float(message.fedprox_mu)
-                global_coef = (1.0 - mu) * avg_coef + mu * prev_coef
-                global_intercept = float((1.0 - mu) * avg_intercept + mu * prev_intercept)
+            if isinstance(self.team_to_cluster, dict) and self.team_to_cluster:
+                by_cluster = {}
+                for (team, coef, intercept) in self.received:
+                    cid = self.team_to_cluster.get(team)
+                    if cid is None:
+                        continue
+                    by_cluster.setdefault(cid, {"coefs": [], "ints": []})
+                    by_cluster[cid]["coefs"].append(coef)
+                    by_cluster[cid]["ints"].append(intercept)
+                cluster_models = {}
+                for cid, vals in by_cluster.items():
+                    avg_coef = np.mean(vals["coefs"], axis=0).reshape(1, -1)
+                    avg_intercept = float(np.mean(vals["ints"], axis=0))
+                    if isinstance(self.last_global, dict) and message.fedprox_mu > 0.0 and cid in self.last_global:
+                        pcoef, pint = self.last_global[cid]
+                        mu = float(message.fedprox_mu)
+                        gcoef = (1.0 - mu) * avg_coef + mu * pcoef
+                        gint = float((1.0 - mu) * avg_intercept + mu * pint)
+                    else:
+                        gcoef, gint = avg_coef, avg_intercept
+                    cluster_models[cid] = {"coef": gcoef, "intercept": gint}
+
+                self.system.tell("crdt", Increment())
+                try:
+                    self.system.tell("scheduler", SetClusterModels(cluster_models))
+                except Exception:
+                    pass
+
+                all_coefs = [m["coef"] for m in cluster_models.values()]
+                all_ints = [m["intercept"] for m in cluster_models.values()]
+                if all_coefs and all_ints:
+                    gcoef = np.mean(all_coefs, axis=0)
+                    gint = float(np.mean(all_ints, axis=0))
+                    self.system.tell("evaluator", GlobalModel(gcoef, gint, round_idx=message.round_idx))
+                print(f"[AggregatorP2P] Round {message.round_idx}/{message.total_rounds} → poslati per-cluster modeli ({len(cluster_models)})")
+
+                self.last_global = {cid: (m["coef"].copy(), m["intercept"]) for cid, m in cluster_models.items()}
+                self.received = []
             else:
-                global_coef = avg_coef
-                global_intercept = avg_intercept
-
-            self.system.tell("crdt", Increment())
-            self.system.tell("evaluator", GlobalModel(global_coef, global_intercept, round_idx=message.round_idx))
-            try:
-                self.system.tell("scheduler", SetGlobalModel(global_coef, global_intercept))
-            except Exception:
-                pass
-            print(f"[AggregatorP2P] Round {message.round_idx}/{message.total_rounds} → poslat GlobalModel evaluatoru")
-
-            self.last_global = (global_coef.copy(), global_intercept)
-            self.received = []
+                coefs = [c for (_, c, _) in self.received]
+                intercepts = [i for (_, _, i) in self.received]
+                avg_coef = np.mean(coefs, axis=0).reshape(1, -1)
+                avg_intercept = float(np.mean(intercepts, axis=0))
+                if (self.last_global is not None) and (not isinstance(self.last_global, dict)) and message.fedprox_mu > 0.0:
+                    prev_coef, prev_intercept = self.last_global
+                    mu = float(message.fedprox_mu)
+                    global_coef = (1.0 - mu) * avg_coef + mu * prev_coef
+                    global_intercept = float((1.0 - mu) * avg_intercept + mu * prev_intercept)
+                else:
+                    global_coef = avg_coef
+                    global_intercept = avg_intercept
+                self.system.tell("crdt", Increment())
+                self.system.tell("evaluator", GlobalModel(global_coef, global_intercept, round_idx=message.round_idx))
+                try:
+                    self.system.tell("scheduler", SetGlobalModel(global_coef, global_intercept))
+                except Exception:
+                    pass
+                print(f"[AggregatorP2P] Round {message.round_idx}/{message.total_rounds} → poslat GlobalModel evaluatoru")
+                self.last_global = (global_coef.copy(), global_intercept)
+                self.received = []
 
     async def on_start(self):
         print("[AggregatorP2P] spreman za prijem lokalnih modela")

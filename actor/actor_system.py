@@ -122,6 +122,24 @@ class ActorSystem:
             coef = np.array(payload["coef"], dtype=float)
             intercept = float(payload["intercept"])
             self.tell(target, SetGlobalModel(coef, intercept))
+        elif mtype == "SetClusterModels":
+            from actor.aggregator import SetClusterModels
+            # payload: { cid: {"coef": [...], "intercept": float} }
+            import numpy as np
+            cluster_models = {}
+            for cid, m in (payload or {}).items():
+                cluster_models[cid] = {"coef": np.array(m["coef"], dtype=float).reshape(1, -1), "intercept": float(m["intercept"]) }
+            self.tell(target, SetClusterModels(cluster_models))
+        elif mtype == "SetTeamClusters":
+            from actor.aggregator import SetTeamClusters as AggSetTeamClusters
+            from actor.scheduler import SetTeamClusters as SchSetTeamClusters
+            mapping = dict(payload.get("mapping", {}))
+            # Forward to either actor type
+            if target in self.actors and isinstance(self.actors[target], object):
+                try:
+                    self.tell(target, AggSetTeamClusters(mapping))
+                except Exception:
+                    self.tell(target, SchSetTeamClusters(mapping))
         elif mtype == "PeerList":
             from actor.p2p import PeerList
             self.tell(target, PeerList(payload["peers"], bool(payload.get("is_reporter", False)), payload.get("reporter_name"), int(payload.get("total_rounds", 1))))
@@ -229,6 +247,11 @@ class ActorSystem:
             return {"target": target, "type": "RoundComplete", "payload": {"round_idx": message.round_idx, "total_rounds": message.total_rounds, "fedprox_mu": message.fedprox_mu}}
         if mname == "SetGlobalModel":
             return {"target": target, "type": "SetGlobalModel", "payload": {"coef": list(message.coef.ravel()), "intercept": float(message.intercept)}}
+        if mname == "SetClusterModels":
+            payload = {cid: {"coef": list(m["coef"].ravel()), "intercept": float(m["intercept"]) } for cid, m in message.cluster_models.items()}
+            return {"target": target, "type": "SetClusterModels", "payload": payload}
+        if mname == "SetTeamClusters":
+            return {"target": target, "type": "SetTeamClusters", "payload": {"mapping": message.mapping}}
         if mname == "PeerList":
             return {"target": target, "type": "PeerList", "payload": {"peers": list(message.peers), "is_reporter": bool(message.is_reporter), "reporter_name": message.reporter_name, "total_rounds": message.total_rounds}}
         if mname == "PeerReady":
