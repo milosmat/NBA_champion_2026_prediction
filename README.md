@@ -1,259 +1,297 @@
-# NBA Champion 2026 – Federativno Učenje & Aktorski Sistem
+# NBA Champion 2026 – Federated Learning & Actor System
 
-Distribuirani sistem za predikciju šampiona (i plej-of serija) koristeći federativno učenje (FedAvg / FedProx) na istorijskim NBA podacima. Implementirano preko prilagođenog asinhronog aktorskog modela sa više režima rada: provider (centralni agregator), P2P i gossip. Uključen je i gRPC transport, CRDT replikacija i simulacija plej-of bracket-a (QF→SF→F) sa upisom u SQLite.
+Distributed system for predicting the NBA champion (and individual playoff series) using federated learning (FedAvg / FedProx) on historical NBA data. Implemented with a custom asynchronous actor model supporting multiple orchestration modes: provider (central aggregator), peer‑to‑peer (P2P), and gossip. Includes gRPC transport, CRDT replication, and playoff bracket simulation (QF → SF → F) with persistence to SQLite.
 
-## Sadržaj
+## Contents
 
-1. Karakteristike
-2. Arhitektura (aktori & poruke)
-3. Zahtevi i instalacija
-4. Priprema okruženja i podataka
-5. Pokretanje (provider / p2p / p2p-gossip)
-6. gRPC transport (stubovi, pokretanje, troubleshooting)
-7. Federativni algoritmi (FedAvg, FedProx)
-8. Playoff simulacija i čitanje šampiona
-9. CRDT (PN-Counter, LWW-Map)
-10. Benchmarking
-11. Testiranje (pytest)
-12. Struktura SQLite baze
-13. Česta pitanja & problemi
-14. Sledeći koraci / ideje
+1. Features  
+2. Architecture (actors & messages)  
+3. Requirements & installation  
+4. Data preparation  
+5. Running (provider / p2p / p2p-gossip)  
+6. gRPC transport (stubs, run, troubleshooting)  
+7. Federated algorithms (FedAvg, FedProx)  
+8. Playoff simulation & champion extraction  
+9. CRDT (PN-Counter, LWW-Map)  
+10. Benchmarking  
+11. Testing (pytest)  
+12. SQLite schema  
+13. Troubleshooting & FAQ  
+14. Next steps / ideas  
 
-## 1. Karakteristike
+## 1. Features
 
-- Federativno učenje: FedAvg + opcioni FedProx (μ regularizacija na klijentu i serverski blend).
-- Više režima orkestracije: centralni provider, P2P work-stealing, gossip sinhronizacija rundi (barijera PeerReady).
-- Evaluator: accuracy, log_loss, brier; baseline centralizovani model; simulacija plej-of serija & bracket.
-- CRDT: PN-Counter (broj rundi) i LWW-Map (primer replikacije) sa replikatorom.
-- Health & Supervizor: ping/ack, restart logika.
-- gRPC transport (pored TCP) sa generisanim protobuf stubovima.
-- SQLite perzistencija: rezultati po rundi + playoff serije (sa stage: QF/SF/F) + globalni model JSON.
-- Skripte: benchmark, playoff champion ekstrakcija.
+- Federated learning: FedAvg + optional FedProx (μ regularization on client with server blend).
+- Multiple orchestration modes: central provider, P2P work‑stealing, gossip round synchronization (barrier via `PeerReady`).
+- Evaluator: accuracy, log_loss, brier; baseline centralized model; playoff series simulation & bracket resolution.
+- CRDT: PN-Counter (round counting) and LWW-Map (example key/value replication) with delta replicator.
+- Health & supervision: ping/ack, restart logic.
+- gRPC transport (in addition to raw TCP) via generated protobuf stubs.
+- SQLite persistence: per‑round results + playoff series (stage: QF/SF/F) + global model JSON.
+- Scripts: benchmarking, playoff champion extraction.
 
-## 2. Arhitektura
+## 2. Architecture
 
-Aktori (asyncio):
+Asyncio actors:
 
-- `TeamNodeWorker` / `TeamNodeP2P`: lokalni trening, slanje modelskih ažuriranja.
-- `Aggregator` (provider) i `AggregatorP2P`: prikupljanje & FedAvg / slanje globalnog modela.
-- `Evaluator`: računa metrike & simulira playoff bracket.
-- `Scheduler` (u provider modu): dodela timova / radnih komada (work stealing).
-- `CrdtReplicator`: širenje CRDT delti.
-- `HealthMonitor` & `Supervisor`: nadzor i restart.
+- `TeamNodeWorker` / `TeamNodeP2P`: local training, sending model updates.
+- `Aggregator` (provider) / `AggregatorP2P`: collecting updates & performing FedAvg / broadcasting global model.
+- `Evaluator`: metrics + playoff bracket simulation.
+- `Scheduler` (provider mode): task assignment / work stealing.
+- `CrdtReplicator`: CRDT delta dissemination.
+- `HealthMonitor` & `Supervisor`: liveness checks and restart orchestration.
 
-Glavne poruke (nije iscrpno): `TrainRequest`, `ModelShare` / `RoundComplete`, `SetGlobalModel`, `EvalRequest` / `EvalReport`, `PeerList`, `PeerReady`, `StartRound`, `CrdtDelta`, `HealthPing/Ack`.
+Representative messages:  
+`TrainRequest`, `ModelShare`, `RoundComplete`, `SetGlobalModel`, `EvalRequest`, `EvalReport`, `PeerList`, `PeerReady`, `StartRound`, `CrdtDelta`, `HealthPing`, `HealthAck`.
 
-## 3. Zahtevi i instalacija
+## 3. Requirements & Installation
 
-Preporuka: Python 3.11+ (ok i 3.13), PowerShell na Windows-u.
+Recommended: Python 3.11+ (3.13 also fine). PowerShell examples below (Windows).
 
-Kreiranje i aktiviranje venv okruženja:
+Create and activate virtual environment:
 
-powershell
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --upgrade pip setuptools wheel
+pip install scikit-learn numpy pandas grpcio grpcio-tools
+```
 
-# scikit-learn numpy pandas grpcio grpcio-tools
+Generate gRPC stubs:
 
-Generisanje gRPC stubova:
-
-powershell
+```powershell
 python -m grpc_tools.protoc -I rpc --python_out=rpc --grpc_python_out=rpc rpc/actor.proto
+```
 
-## 4. Priprema podataka
+## 4. Data Preparation
 
-Direktorijum `dataset/` već sadrži očišćen CSV (`nba_games_clean.csv`) i timske CSV fajlove u `dataset/teams` ili `teams/`. Trenutni kod koristi podatke direktno – nije potreban dodatni import. Pri dodavanju novih CSV fajlova, kolone treba da budu konzistentne.
+Directory `dataset/` already contains cleaned CSV (`nba_games_clean.csv`) and team CSV files under `dataset/teams` or `teams/`. Code reads them directly—no extra import steps. If adding new CSVs, keep column names consistent with existing schema.
 
-## 5. Pokretanje režima
+## 5. Running Modes
 
-Ulazna tačka: `main.py` sa argumentom `--mode`.
+Entry point: `main.py` with `--mode`.
 
-Zajednički parametri (primeri):
+Common arguments:
 
-- `--mode` provider | p2p | p2p-gossip
-- `--node` identifikator čvora (npr. MIA)
-- `--host` / `--port` mrežni parametri
-- `--transport` tcp | grpc
-- `--rounds` broj federativnih rundi (provider/p2p)
-- `--fedprox_mu` koeficijent μ (opciono)
-- `--async-fed` asinhrono federisano učenje (bez barijere po rundama; važi za P2P sa Scheduler/Worker)
-- `--async-batch` broj ModelShare ažuriranja po jednoj async agregaciji (podrazumevano 8)
+| Flag | Meaning |
+|------|---------|
+| `--mode` | provider | p2p | p2p-gossip |
+| `--node` | node identifier (e.g. MIA) |
+| `--host` / `--port` | networking parameters |
+| `--transport` | tcp | grpc |
+| `--rounds` | number of federated rounds (provider / p2p) |
+| `--fedprox_mu` | FedProx μ coefficient |
+| `--async-fed` | asynchronous federated learning (no round barrier; P2P with Scheduler/Worker) |
+| `--async-batch` | number of `ModelShare` updates per async aggregation (default 8) |
 
-### 5.1 Provider mod
+### 5.1 Provider Mode
 
-Pokreće centralni scheduler + aggregator + evaluator.
+Central scheduler + aggregator + evaluator.
 
-powershell
+```powershell
 python main.py --mode provider --node HUB --host 127.0.0.1 --port 5000 --rounds 2
+```
 
-Radnici (autoregistracija / work stealing):
+Workers (auto‑register / work stealing):
 
-powershell
+```powershell
 python main.py --mode provider --node W1 --host 127.0.0.1 --port 5001 --peers HUB@127.0.0.1:5000
 python main.py --mode provider --node W2 --host 127.0.0.1 --port 5002 --peers HUB@127.0.0.1:5000
+```
 
-### 5.2 P2P mod
+### 5.2 P2P Mode
 
-Svaki čvor radi lokalni trening i šalje model aggregatoru-ravnopravno.
+Each node trains locally and shares its model; aggregator role is peer-level.
 
-powershell
+```powershell
 python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5100 --rounds 2
 python main.py --mode p2p --node BOS --host 127.0.0.1 --port 5101 --peers MIA@127.0.0.1:5100 --rounds 2
 python main.py --mode p2p --node CHI --host 127.0.0.1 --port 5102 --peers MIA@127.0.0.1:5100,BOS@127.0.0.1:5101 --rounds 2
+```
 
-#### 5.2.1 P2P async mod (bez barijere)
+#### 5.2.1 P2P Async (No Barrier)
 
-Napomena: Async mod važi za P2P sa Scheduler/Worker orkestracijom. U async modu argument `--rounds` se ignoriše; globalni modeli se emituju inkrementalno posle svakih `--async-batch` lokalnih ažuriranja.
+Async mode (P2P with Scheduler/Worker) ignores `--rounds`; global models broadcast incrementally after each `--async-batch` local update group.
 
-powershell
+```powershell
 python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5110 --async-fed --async-batch 8 --fedprox_mu 0.01
 python main.py --mode p2p --node BOS --host 127.0.0.1 --port 5111 --peers MIA@127.0.0.1:5110 --async-fed --async-batch 8 --fedprox_mu 0.01
 python main.py --mode p2p --node CHI --host 127.0.0.1 --port 5112 --peers MIA@127.0.0.1:5110 --async-fed --async-batch 8 --fedprox_mu 0.01
+```
 
-Zaustavljanje u P2P async modu:
+Stopping async P2P:
+1. Switch to classic round mode (omit `--async-fed`, set `--rounds N`).
+2. Use gossip async mode (5.3.1) with built‑in stop conditions (flush count, time, convergence). Similar stop flags can be added to P2P async if needed.
 
-- P2P async je kontinuiran po dizajnu (nema barijera). Logički kraj se postiže na dva načina:
-  1. upotreba klasičnog P2P režima sa rundama (bez `--async-fed`, uz `--rounds N`) – procesi se završavaju po poslednjoj rundi;
-  2. upotreba „gossip async“ režima (sekcija 5.3.1) sa ugrađenim uslovima zaustavljanja (broj flush-eva, vreme, konvergencija).
+### 5.3 Gossip Mode
 
-Napomena: Po potrebi, isti stop‑parametri mogu se dodati i za P2P async (analogno gossip‑async).
+One reporter (aggregator) waits for all peers in each round; others just send local shares.
 
-### 5.3 Gossip mod
-
-Reporter (barijera + globalni model), ostali peer-ovi šalju samo lokalni share.
-
-powershell
+```powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5200 --peers BOS@127.0.0.1:5201,CHI@127.0.0.1:5202 --reporter --gossip-rounds 2 --gossip-eval
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5201 --peers MIA@127.0.0.1:5200,CHI@127.0.0.1:5202
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5202 --peers MIA@127.0.0.1:5200,BOS@127.0.0.1:5201
+```
 
-Napomena: Gossip mod ostaje runda-baziran (reporter čeka sve peer-ove). Za potpuno asinhrono ponašanje koristi se P2P async mod iz 5.2.1.
+Round‑based; for fully asynchronous streaming use P2P async (5.2.1).
 
-#### 5.3.1 Gossip async (kontinuirani)
+#### 5.3.1 Gossip Async (Continuous)
 
-Eksperimentalno: kontinuirani (bez barijere) gossip mod sa prozorima i starenjem.
+Experimental: continuous gossip mode (no barrier) with batching windows and staleness.
 
-Parametri:
+Parameters:
 
-- `--gossip-async` uključi kontinuirani gossip
-- `--gossip-batch` minimalan broj share-ova pre flush-a (reporter)
-- `--gossip-window-ms` vremenski prozor za flush ako batch nije dosegnut
-- `--gossip-interval-ms` koliko često svaki čvor ponavlja lokalni trening i šalje share
-- `--gossip-staleness` α koeficijent za staleness težine (veće → brže “zaboravljanje” starih verzija)
-- `--gossip-max-flushes` maksimalan broj flush-eva posle kog se reporter automatski zaustavlja (0 = bez limita)
-- `--gossip-max-seconds` maksimalno trajanje kontinuiranog gossip-a (0 = bez limita)
-- `--gossip-converge-eps` epsilon prag konvergencije; meri se L2 delta koeficijenata + |delta intercept| između dva uzastopna globalna modela
-- `--gossip-converge-patience` koliko uzastopnih flush-eva mora biti ispod eps da bi se smatrao konvergiranim
-- `--gossip-eval-on-stop` pokreni playoff evaluaciju pri automatskom stop-u (samo na reporteru)
+| Flag | Meaning |
+|------|---------|
+| `--gossip-async` | Enable continuous gossip |
+| `--gossip-batch` | Min shares before reporter flush |
+| `--gossip-window-ms` | Time window for flush if batch not reached |
+| `--gossip-interval-ms` | Local train/share interval per peer |
+| `--gossip-staleness` | α weight for staleness (higher = faster decay of old versions) |
+| `--gossip-max-flushes` | Max flushes before auto stop (0 = no limit) |
+| `--gossip-max-seconds` | Max duration (0 = no limit) |
+| `--gossip-converge-eps` | Convergence epsilon (L2 coef delta + |intercept delta|) |
+| `--gossip-converge-patience` | Consecutive flushes under eps to declare convergence |
+| `--gossip-eval-on-stop` | Run playoff eval at stop (reporter only) |
 
-powershell
+Example start (continuous):
+
+```powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5210 --peers BOS@127.0.0.1:5211,CHI@127.0.0.1:5212 --reporter --gossip-async --gossip-batch 4 --gossip-window-ms 1500 --gossip-interval-ms 2000 --gossip-staleness 0.5
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5211 --peers MIA@127.0.0.1:5210,CHI@127.0.0.1:5212 --gossip-async --gossip-interval-ms 2000
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5212 --peers MIA@127.0.0.1:5210,BOS@127.0.0.1:5211 --gossip-async --gossip-interval-ms 2000
+```
 
-Primeri sa logičkim stopom:
+Stop after fixed flush count:
 
-powershell
-
-# Stop nakon 5 flush-eva, plus evaluacija na stop
-
+```powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5220 --peers BOS@127.0.0.1:5221,CHI@127.0.0.1:5222 --reporter --gossip-async --gossip-batch 3 --gossip-max-flushes 5 --gossip-eval-on-stop
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5221 --peers MIA@127.0.0.1:5220,CHI@127.0.0.1:5222 --gossip-async
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5222 --peers MIA@127.0.0.1:5220,BOS@127.0.0.1:5221 --gossip-async
+```
 
-powershell
+Stop on convergence or timeout:
 
-# Stop na konvergenciju (eps=1e-3, patience=3) ili po isteku 60s – šta god se desi prvo
-
+```powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5230 --peers BOS@127.0.0.1:5231,CHI@127.0.0.1:5232 --reporter --gossip-async --gossip-batch 3 --gossip-converge-eps 0.001 --gossip-converge-patience 3 --gossip-max-seconds 60 --gossip-eval-on-stop
 python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5231 --peers MIA@127.0.0.1:5230,CHI@127.0.0.1:5232 --gossip-async
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5232 --peers MIA@127.0.0.1:5230,BOS@127.0.0.1:5231 --gossip-async
+```
 
-Napomene:
+Notes:
+- No `--gossip-rounds` in async gossip; evaluation triggered manually or via `--gossip-eval` time window.
+- Results are stream‑like; metrics vary over time.
+- Reporter stops automatically when any configured stop condition is met; peers also exit their actor loop.
 
-- U async-gossip modu nema `--gossip-rounds`; evaluacija se inicira ručno ili uz `--gossip-eval`, vezano za vremenski trenutak (ne za runde).
-- Rezultati su manje “snapshot”, a više “stream” – metrika može varirati; preporučuje se merenje performansi u vremenskim intervalima.
-- Reporter se sam zaustavlja kada ispuni uslov(e) iznad; ostali peer-ovi se takođe gase (aktorski loop izlazi).
+### 5.4 gRPC Transport
 
-### 5.4 gRPC transport
+Add `--transport grpc` to processes (after generating stubs). Ports unchanged.
 
-Dovoljno je dodati `--transport grpc` na sve procese (posle generisanja stubova). Portovi ostaju isti.
-
-powershell
+```powershell
 python main.py --mode p2p-gossip --node MIA --host 127.0.0.1 --port 5300 --peers BOS@127.0.0.1:5301,CHI@127.0.0.1:5302 --reporter --gossip-rounds 2 --gossip-eval --transport grpc
-
-python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5301 --peers
-MIA@127.0.0.1:5300,CHI@127.0.0.1:5302 --transport grpc
-
+python main.py --mode p2p-gossip --node BOS --host 127.0.0.1 --port 5301 --peers MIA@127.0.0.1:5300,CHI@127.0.0.1:5302 --transport grpc
 python main.py --mode p2p-gossip --node CHI --host 127.0.0.1 --port 5302 --peers MIA@127.0.0.1:5300,BOS@127.0.0.1:5301 --transport grpc
+```
 
-Ukoliko se pojavi poruka o stubovima – pratiti instrukcije iz same greške.
+If stub errors appear, follow error instructions (usually regenerate protobuf stubs).
 
 ## 6. FedProx
 
-Aktiviraj dodavanjem `--fedprox-mu` (npr. 0.01). Radnici u klijent treninzima dodaju proximal regularizaciju prema globalnom modelu.
+Enable with `--fedprox-mu` (e.g. 0.01). Clients apply proximal regularization toward current global model.
 
-powershell
+```powershell
 python main.py --mode p2p --node MIA --host 127.0.0.1 --port 5400 --rounds 3 --fedprox_mu 0.01
+```
 
-## 7. Playoff simulacija & šampion
+## 7. Playoff Simulation & Champion
 
-- Evaluator posle poslednje runde (ili kada je aktivirano `--gossip-eval`) simulira bracket: QF (do 16 timova) → SF → F.
-- Serije se upisuju u tabelu `playoffs` sa kolonom `stage` (QF/SF/F).
-- Skripta za čitanje finala:
+- After final round (or when `--gossip-eval` triggers), evaluator simulates bracket: Quarterfinals (up to 16 teams) → Semifinals → Finals.
+- Series recorded in `playoffs` table with `stage` (QF/SF/F).
+- Champion extraction script:
 
-powershell
+```powershell
 python scripts/who_wins_playoffs.py
+```
 
-Primer izlaza:
+Example output:
 
+```
 Finals: LBN vs UTH -> 4:3 winner=LBN ...
 Predicted champion: LBN
+```
 
 ## 8. CRDT
 
-- PN-Counter: inkrement po rundi, repliciran preko replikatora.
-- LWW-Map: čuvanje ključ→vrednost sa timestamp orderingom.
-  Logovi označeni sa `[CRDT]` prikazuju vrednosti.
+- PN-Counter: increments per round, replicated via deltas.
+- LWW-Map: key→value with timestamp precedence.
+- Log entries tagged `[CRDT]` show propagated state.
 
 ## 9. Benchmarking
 
-`bench.py` pokreće scenarije i meri vreme do pojave reda u `results` tabeli.
+`bench.py` runs scenarios and measures elapsed time until a new row appears in `results`.
 
-powershell
+```powershell
 python bench.py
+```
 
-Rezultat: `storage/bench.json`.
+Output stored at `storage/bench.json`.
 
-## 10. Testovi
+## 10. Tests
 
-Pokretanje:
+Run:
 
-powershell
+```powershell
 pytest -q
+```
 
-Postoje osnovni testovi za serializaciju poruka i FedAvg agregaciju.
+Contains baseline tests for message serialization and FedAvg aggregation correctness.
 
-## 11. SQLite struktura
+## 11. SQLite Schema
 
-Fajl: `storage/results.db`
+File: `storage/results.db`
+
+Tables:
 
 - `results(id, timestamp, round_idx, acc, log_loss, brier, model_json)`
 - `playoffs(id, round_idx, team_a, team_b, best_of, wins_a, wins_b, winner, stage, p_a_win, ts)`
-  Globalni model (sklearn koeficijenti) dodatno se čuva u `global_model.json`.
+
+Global model (sklearn coefficients) also stored in `global_model.json`.
 
 ## 12. Troubleshooting
 
-| Problem                   | Uzrok                                              | Rešenje                                                |
-| ------------------------- | -------------------------------------------------- | ------------------------------------------------------ |
-| gRPC: "stubs not found"   | Nema generisanih `actor_pb2*.py`                   | Pokreni protoc komandu iz sekcije 3                    |
-| Import greška `actor_pb2` | Nema `rpc/__init__.py` ili nije paket              | Proveri da postoji datoteka `rpc/__init__.py`          |
-| Nema novih playoff redova | Nije poslednja runda / `--gossip-eval` izostavljen | Pokreni sa `--gossip-eval` ili sačekaj poslednju rundu |
-| FedProx nema efekat       | μ=0 ili nema globalnog modela prve runde           | Povećaj `--fedprox-mu` (>0), više rundi                |
-| Port zauzet               | Prethodni proces nije ugašen                       | Prekini python proces (Task Manager) i promeni port    |
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| gRPC: "stubs not found" | Missing generated `actor_pb2*.py` | Run protoc command (section 3) |
+| Import error `actor_pb2` | Missing `rpc/__init__.py` | Ensure `rpc/__init__.py` exists |
+| No new playoff rows | Not final round / missing `--gossip-eval` | Run with `--gossip-eval` or complete rounds |
+| FedProx no effect | μ=0 or no initial global model | Increase `--fedprox-mu` (>0), run more rounds |
+| Port already in use | Previous process still running | Kill process / change port |
+| Champion script empty | No finals recorded yet | Ensure evaluator ran, or trigger eval manually |
 
-Provera šampiona:
+Champion check:
 
-powershell
+```powershell
 python scripts/who_wins_playoffs.py
+```
+
+## 13. FAQ
+
+| Question | Answer |
+|----------|--------|
+| Can I mix TCP and gRPC nodes? | Recommend uniform transport; mixing requires adapter logic. |
+| Is async gossip reproducible? | Less deterministic—use fixed seeds & controlled intervals for experiments. |
+| Why brier score? | Calibration measure—useful for probability quality beyond accuracy/log_loss. |
+| Where are model weights stored? | `model_json` column (serialized coefficients/intercept) + `global_model.json`. |
+| How to add a new team? | Append team CSV, ensure schema match, restart nodes (dynamic loading optional). |
+
+## 14. Next Steps / Ideas
+
+- Model personalization layer (team‑specific fine‑tuning after global broadcast).
+- Differential privacy noise addition for model shares.
+- Hierarchical federation (conference → league).
+- Adaptive μ for FedProx based on divergence.
+- Advanced CRDT (OR-Set for dynamic peer lists).
+- Live WebSocket dashboard (metrics stream).
+- GPU acceleration for training loops if model complexity increases.
+
+---
